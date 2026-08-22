@@ -1,0 +1,266 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum JobStatus {
+  QUEUED
+  SCHEDULED
+  CLAIMED
+  RUNNING
+  COMPLETED
+  FAILED
+  RETRYING
+  DLQ
+  CANCELLED
+}
+
+enum JobType {
+  IMMEDIATE
+  DELAYED
+  SCHEDULED
+  RECURRING
+  BATCH
+}
+
+enum HandlerType {
+  DELAY_TEST
+  FAIL_TEST
+  PROCESS_DATA
+  SEND_EMAIL
+  GENERATE_REPORT
+}
+
+enum RetryStrategy {
+  FIXED
+  LINEAR
+  EXPONENTIAL
+}
+
+enum WorkerStatus {
+  ONLINE
+  BUSY
+  DRAINING
+  OFFLINE
+}
+
+enum ExecutionStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model User {
+  id           String               @id @default(cuid())
+  email        String               @unique
+  passwordHash String
+  name         String
+  tokenVersion Int                  @default(0)
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+  memberships  OrganizationMember[]
+}
+
+model Organization {
+  id          String               @id @default(cuid())
+  name        String
+  description String?
+  slug        String               @unique
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  members     OrganizationMember[]
+  projects    Project[]
+}
+
+model OrganizationMember {
+  id             String       @id @default(cuid())
+  userId         String
+  organizationId String
+  role           String       @default("MEMBER")
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+}
+
+model Project {
+  id             String       @id @default(cuid())
+  organizationId String
+  name           String
+  description    String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  queues         Queue[]
+  jobs           Job[]
+  batches        JobBatch[]
+
+  @@index([organizationId])
+}
+
+model Queue {
+  id          String                 @id @default(cuid())
+  projectId   String
+  name        String
+  description String?
+  priority    Int                    @default(0)
+  concurrency Int                    @default(1)
+  paused      Boolean                @default(false)
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+  project     Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  retryPolicy RetryPolicy?
+  jobs        Job[]
+  dlqEntries  DeadLetterQueueEntry[]
+
+  @@unique([projectId, name])
+  @@index([projectId, paused, priority])
+}
+
+model RetryPolicy {
+  id                  String        @id @default(cuid())
+  queueId             String        @unique
+  strategy            RetryStrategy @default(EXPONENTIAL)
+  maximumAttempts     Int           @default(3)
+  initialDelaySeconds Int           @default(10)
+  maximumDelaySeconds Int           @default(3600)
+  queue               Queue         @relation(fields: [queueId], references: [id], onDelete: Cascade)
+}
+
+model Job {
+  id             String                @id @default(cuid())
+  projectId      String
+  queueId        String
+  name           String
+  type           JobType               @default(IMMEDIATE)
+  handlerType    HandlerType           @default(PROCESS_DATA)
+  payload        Json
+  priority       Int                   @default(0)
+  status         JobStatus             @default(QUEUED)
+  scheduledAt    DateTime              @default(now())
+  cronExpression String?
+  batchId        String?
+  maxAttempts    Int                   @default(3)
+  attempts       Int                   @default(0)
+  startedAt      DateTime?
+  completedAt    DateTime?
+  claimedAt      DateTime?
+  claimedBy      String?
+  lastError      String?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+  project        Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  queue          Queue                 @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  executions     JobExecution[]
+  logs           JobLog[]
+  dlqEntry       DeadLetterQueueEntry?
+  scheduledJob   ScheduledJob?
+  batch          JobBatch?             @relation(fields: [batchId], references: [id], onDelete: SetNull)
+
+  @@index([queueId, status, scheduledAt, priority])
+  @@index([projectId, createdAt])
+  @@index([batchId])
+}
+
+model JobBatch {
+  id        String   @id @default(cuid())
+  projectId String
+  name      String
+  totalJobs Int
+  createdAt DateTime @default(now())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  jobs      Job[]
+
+  @@index([projectId, createdAt])
+}
+
+model JobExecution {
+  id            String          @id @default(cuid())
+  jobId         String
+  workerId      String?
+  attemptNumber Int
+  status        ExecutionStatus @default(RUNNING)
+  startedAt     DateTime        @default(now())
+  completedAt   DateTime?
+  durationMs    Int?
+  error         String?
+  job           Job             @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  worker        Worker?         @relation(fields: [workerId], references: [id], onDelete: SetNull)
+
+  @@index([jobId, startedAt])
+}
+
+model JobLog {
+  id        String   @id @default(cuid())
+  jobId     String?
+  workerId  String?
+  level     String   @default("INFO")
+  message   String
+  metadata  Json?
+  createdAt DateTime @default(now())
+  job       Job?     @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  worker    Worker?  @relation(fields: [workerId], references: [id], onDelete: SetNull)
+
+  @@index([jobId, createdAt])
+}
+
+model Worker {
+  id              String                 @id
+  hostname        String
+  processId       Int
+  status          WorkerStatus           @default(ONLINE)
+  startedAt       DateTime               @default(now())
+  lastHeartbeatAt DateTime               @default(now())
+  currentJobId    String?
+  jobsProcessed   Int                    @default(0)
+  executions      JobExecution[]
+  heartbeats      WorkerHeartbeat[]
+  logs            JobLog[]
+  dlqEntries      DeadLetterQueueEntry[]
+
+  @@index([status, lastHeartbeatAt])
+}
+
+model WorkerHeartbeat {
+  id           String       @id @default(cuid())
+  workerId     String
+  recordedAt   DateTime     @default(now())
+  status       WorkerStatus
+  currentJobId String?
+  worker       Worker       @relation(fields: [workerId], references: [id], onDelete: Cascade)
+
+  @@index([workerId, recordedAt])
+}
+
+model ScheduledJob {
+  id        String   @id @default(cuid())
+  jobId     String   @unique
+  cron      String
+  nextRunAt DateTime
+  enabled   Boolean  @default(true)
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([enabled, nextRunAt])
+}
+
+model DeadLetterQueueEntry {
+  id            String    @id @default(cuid())
+  jobId         String    @unique
+  queueId       String
+  failureReason String
+  attempts      Int
+  lastError     String
+  workerId      String?
+  createdAt     DateTime  @default(now())
+  retriedAt     DateTime?
+  job           Job       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  queue         Queue     @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  worker        Worker?   @relation(fields: [workerId], references: [id], onDelete: SetNull)
+
+  @@index([queueId, createdAt])
+}

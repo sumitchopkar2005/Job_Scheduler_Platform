@@ -1,0 +1,21 @@
+{
+  "name": "distributed-job-scheduler",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "backend",
+    "worker",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace backend\" \"npm run dev --workspace worker\" \"npm run dev --workspace frontend\"",
+    "test": "npm run test --workspace backend",
+    "test:integration": "npm run test:integration --workspace worker",
+    "db:generate": "npm run prisma:generate --workspace backend",
+    "db:push": "npm run prisma:push --workspace backend",
+    "db:migrate": "npm run prisma:migrate --workspace backend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@scheduler/worker",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/worker.js",
+    "start": "node src/worker.js",
+    "test": "node --test test/*.test.js",
+    "test:integration": "cross-env RUN_DB_TESTS=1 node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.7.0",
+    "dotenv": "^16.5.0",
+    "ioredis": "^5.6.1",
+    "nanoid": "^5.1.5",
+    "node-cron": "^4.2.0",
+    "cron-parser": "^5.1.1"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0"
+  }
+}
