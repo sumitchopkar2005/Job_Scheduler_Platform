@@ -30,7 +30,12 @@ test("two workers cannot claim the same job", { skip: !enabled }, async () => {
       },
     });
     const queue = await prisma.queue.create({
-      data: { projectId: project.id, name: `claim-${suffix}`, concurrency: 1 },
+      data: {
+        projectId: project.id,
+        name: `claim-${suffix}`,
+        concurrency: 1,
+        paused: true,
+      },
     });
     const job = await prisma.job.create({
       data: {
@@ -49,6 +54,12 @@ test("two workers cannot claim the same job", { skip: !enabled }, async () => {
         { id: firstWorkerId, hostname: "test-host", processId: 1 },
         { id: secondWorkerId, hostname: "test-host", processId: 2 },
       ],
+    });
+    const pausedClaim = await claimNextJob(firstWorkerId);
+    assert.equal(pausedClaim, null);
+    await prisma.queue.update({
+      where: { id: queue.id },
+      data: { paused: false },
     });
     const [first, second] = await Promise.all([
       claimNextJob(firstWorkerId),

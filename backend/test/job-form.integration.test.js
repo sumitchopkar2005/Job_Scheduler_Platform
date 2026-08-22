@@ -110,3 +110,52 @@ test(
     await prisma.user.delete({ where: { email } });
   },
 );
+
+test(
+  "queue pause and resume controls update an authorized queue",
+  { skip: !enabled },
+  async () => {
+    const suffix = Date.now().toString(36);
+    const email = `queue-control-${suffix}@test.local`;
+    const password = "Correct-Horse1!";
+    const register = await request(app)
+      .post("/api/v1/auth/register")
+      .send({
+        name: "Queue Control Test",
+        email,
+        password,
+        passwordConfirmation: password,
+      });
+    const token = register.body.data.token;
+    const organization = await prisma.organization.findFirstOrThrow({
+      where: { members: { some: { user: { email } } } },
+    });
+    const project = await request(app)
+      .post("/api/v1/projects")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ organizationId: organization.id, name: `Queue Control ${suffix}` });
+    const queue = await request(app)
+      .post("/api/v1/queues")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        projectId: project.body.data.project.id,
+        name: `queue-control-${suffix}`,
+      });
+
+    try {
+      const paused = await request(app)
+        .post(`/api/v1/queues/${queue.body.data.queue.id}/pause`)
+        .set("Authorization", `Bearer ${token}`);
+      assert.equal(paused.status, 200);
+      assert.equal(paused.body.data.queue.paused, true);
+
+      const resumed = await request(app)
+        .post(`/api/v1/queues/${queue.body.data.queue.id}/resume`)
+        .set("Authorization", `Bearer ${token}`);
+      assert.equal(resumed.status, 200);
+      assert.equal(resumed.body.data.queue.paused, false);
+    } finally {
+      await prisma.user.delete({ where: { email } });
+    }
+  },
+);

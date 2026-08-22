@@ -163,6 +163,7 @@ model Job {
   batch          JobBatch?             @relation(fields: [batchId], references: [id], onDelete: SetNull)
 
   @@index([queueId, status, scheduledAt, priority])
+  @@index([status, claimedAt])
   @@index([projectId, createdAt])
   @@index([batchId])
 }

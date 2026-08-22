@@ -11,36 +11,46 @@ export async function recoverStaleJobs(staleAfterMs) {
     select: { id: true, claimedBy: true },
   });
 
+  let recoveredCount = 0;
   for (const job of staleJobs) {
-    await prisma.$transaction([
-      prisma.job.update({
-        where: { id: job.id },
+    const recovered = await prisma.$transaction(async (tx) => {
+      const updated = await tx.job.updateMany({
+        where: {
+          id: job.id,
+          status: { in: ["CLAIMED", "RUNNING"] },
+          claimedAt: { lt: cutoff },
+          claimedBy: job.claimedBy,
+        },
         data: {
           status: "QUEUED",
           claimedBy: null,
           claimedAt: null,
           startedAt: null,
         },
-      }),
-      prisma.jobExecution.updateMany({
+      });
+      if (updated.count !== 1) return false;
+
+      await tx.jobExecution.updateMany({
         where: { jobId: job.id, status: "RUNNING" },
         data: {
           status: "FAILED",
           completedAt: new Date(),
           error: "Worker heartbeat became stale",
         },
-      }),
-      prisma.jobLog.create({
+      });
+      await tx.jobLog.create({
         data: {
           jobId: job.id,
           level: "WARN",
           message: "Stale job recovered after worker heartbeat timeout",
           metadata: { previousWorkerId: job.claimedBy },
         },
-      }),
-    ]);
+      });
+      return true;
+    });
+    if (recovered) recoveredCount += 1;
   }
-  return staleJobs.length;
+  return recoveredCount;
 }
 
 export async function promoteDueRetries() {

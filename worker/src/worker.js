@@ -214,6 +214,7 @@ async function poll() {
   await promoteDueRetries();
   await promoteDueScheduledJobs();
   await recoverStaleJobs(config.staleAfterMs);
+  if (shuttingDown) return;
   const job = await claimNextJob(config.workerId);
   if (!job) return;
   activeJobs.add(job.id);
@@ -256,7 +257,7 @@ async function shutdown(signal) {
 }
 
 await connectWithRetry();
-const stopHeartbeat = startHeartbeat(() => currentJobId);
+const stopHeartbeat = startHeartbeat(() => [...activeJobs]);
 const poller = setInterval(
   () => poll().catch((error) => console.error("Polling failed safely", error)),
   config.pollIntervalMs,

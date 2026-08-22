@@ -20,9 +20,10 @@ export async function registerWorker() {
   });
 }
 
-export function startHeartbeat(getCurrentJobId) {
+export function startHeartbeat(getActiveJobIds) {
   const beat = async () => {
-    const currentJobId = getCurrentJobId();
+    const activeJobIds = getActiveJobIds();
+    const currentJobId = activeJobIds[0] || null;
     const recordedAt = new Date();
     await prisma.$transaction([
       prisma.worker.update({
@@ -41,11 +42,11 @@ export function startHeartbeat(getCurrentJobId) {
           recordedAt,
         },
       }),
-      ...(currentJobId
+      ...(activeJobIds.length > 0
         ? [
             prisma.job.updateMany({
               where: {
-                id: currentJobId,
+                id: { in: activeJobIds },
                 claimedBy: config.workerId,
                 status: { in: ["CLAIMED", "RUNNING"] },
               },
@@ -57,7 +58,7 @@ export function startHeartbeat(getCurrentJobId) {
         data: {
           workerId: config.workerId,
           message: "Worker heartbeat",
-          metadata: { currentJobId },
+          metadata: { currentJobId, activeJobIds },
         },
       }),
     ]);
