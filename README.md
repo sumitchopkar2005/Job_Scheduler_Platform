@@ -15,7 +15,15 @@ Reliable background work must survive concurrent workers, crashes, delayed sched
 - JWT authentication, membership-based authorization, and IDOR protection.
 - At-least-once job execution with execution and log history.
 
-## Architecture
+## System Architecture
+
+![Job Scheduler Platform system architecture](docs/images/system-architecture.png)
+
+The platform follows a durable, database-backed flow: the React frontend sends authenticated requests to the Express REST API, which validates and authorizes them before reading or writing PostgreSQL. The API publishes Redis notifications to wake workers, while the worker pool continues polling PostgreSQL as a fallback. Workers atomically claim eligible jobs, enforce per-queue concurrency, execute handlers, and persist status and execution history back to PostgreSQL.
+
+Authentication uses bcrypt password hashes and minimal JWT claims. Authorization is membership-based and follows the organization → project → queue → job hierarchy, preventing users from accessing resources outside their organizations. PostgreSQL is the source of truth for users, memberships, projects, queues, jobs, claims, executions, heartbeats, retries, and DLQ entries.
+
+Worker heartbeats refresh active-job leases, and stale claims are recovered. Lease fencing prevents an older worker from overwriting a newer claim. Failed jobs use the queue's retry policy and move to the dead-letter queue after exhausting attempts. Optional project-scoped idempotency keys prevent duplicate job creation, and successful recurring jobs create their next scheduled occurrence from the configured cron expression.
 
 ```text
 React/Vite dashboard --Bearer JWT--> Express API --> PostgreSQL
