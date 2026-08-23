@@ -159,3 +159,55 @@ test(
     }
   },
 );
+
+test(
+  "recurring jobs reject invalid cron expressions before scheduling",
+  { skip: !enabled },
+  async () => {
+    const suffix = Date.now().toString(36);
+    const email = `invalid-cron-${suffix}@test.local`;
+    const password = "Correct-Horse1!";
+    const register = await request(app)
+      .post("/api/v1/auth/register")
+      .send({
+        name: "Cron Validation Test",
+        email,
+        password,
+        passwordConfirmation: password,
+      });
+    const token = register.body.data.token;
+    const organization = await prisma.organization.findFirstOrThrow({
+      where: { members: { some: { user: { email } } } },
+    });
+    const project = await request(app)
+      .post("/api/v1/projects")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ organizationId: organization.id, name: `Cron Validation ${suffix}` });
+    const queue = await request(app)
+      .post("/api/v1/queues")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        projectId: project.body.data.project.id,
+        name: `cron-validation-${suffix}`,
+      });
+
+    try {
+      const response = await request(app)
+        .post("/api/v1/jobs")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          projectId: project.body.data.project.id,
+          queueId: queue.body.data.queue.id,
+          name: "invalid-recurring-job",
+          type: "RECURRING",
+          handlerType: "PROCESS_DATA",
+          scheduledAt: new Date(Date.now() + 60_000).toISOString(),
+          cronExpression: "invalid cron",
+        });
+      assert.equal(response.status, 400);
+      assert.equal(response.body.error.code, "VALIDATION_ERROR");
+    } finally {
+      await prisma.user.delete({ where: { email } });
+    }
+  },
+);

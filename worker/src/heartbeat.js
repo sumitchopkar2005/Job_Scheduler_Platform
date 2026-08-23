@@ -64,7 +64,10 @@ export function startHeartbeat(getActiveJobIds) {
     ]);
   };
   const timer = setInterval(
-    () => beat().catch((error) => console.error("Heartbeat failed", error)),
+    () =>
+      beat().catch((error) =>
+        console.error(`[ERROR] WORKER heartbeat failed | ${error.message}`),
+      ),
     config.heartbeatIntervalMs,
   );
   return () => clearInterval(timer);

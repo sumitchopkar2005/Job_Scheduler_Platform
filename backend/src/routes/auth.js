@@ -150,6 +150,17 @@ router.post("/register", authRateLimit, async (req, res, next) => {
       .status(201)
       .json({ success: true, data: { user: publicUser(user), token } });
   } catch (error) {
+    if (error.code === "P2002" && error.meta?.target?.includes("email")) {
+      return res
+        .status(409)
+        .json({
+          success: false,
+          error: {
+            code: "EMAIL_ALREADY_REGISTERED",
+            message: "An account with this email already exists",
+          },
+        });
+    }
     return next(error);
   }
 });
@@ -172,7 +183,7 @@ router.post("/login", authRateLimit, async (req, res, next) => {
           success: false,
           error: {
             code: "INVALID_CREDENTIALS",
-            message: "Email or password is incorrect",
+            message: "Invalid email or password",
           },
         });
     }

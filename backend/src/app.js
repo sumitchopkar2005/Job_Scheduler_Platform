@@ -9,6 +9,8 @@ import apiRoutes from "./routes/index.js";
 import { openapi } from "./config/openapi.js";
 
 const app = express();
+const logPath = (req) =>
+  req.originalUrl.split("?")[0].replace(/^\/api\/v1/, "") || "/";
 
 app.use(helmet());
 app.use(
@@ -19,7 +21,11 @@ app.use(
   }),
 );
 app.use(express.json({ limit: "1mb" }));
-app.use(morgan("combined"));
+app.use(
+  morgan((tokens, req, res) =>
+    `[API] ${tokens.method(req, res)} ${logPath(req)} → ${tokens.status(req, res)}`,
+  ),
+);
 app.use(rateLimit({ windowMs: 60 * 1000, limit: 120 }));
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(openapi));
 
@@ -41,9 +47,13 @@ app.use((req, res) => {
     });
 });
 
-app.use((error, _req, res, _next) => {
-  console.error(error);
-  res.status(error.statusCode || 500).json({
+app.use((error, req, res, _next) => {
+  const status = error.statusCode || 500;
+  const reason = error.expose ? error.message : error.code || "Internal server error";
+  console.error(
+    `[ERROR] ${req.method} ${logPath(req)} → ${status} | ${reason}`,
+  );
+  res.status(status).json({
     success: false,
     error: {
       code: error.code || "INTERNAL_ERROR",
@@ -57,7 +67,7 @@ const runningUnderNodeTest =
 if (env.nodeEnv !== "test" && !runningUnderNodeTest) {
   const port = env.port;
   app.listen(port, () =>
-    console.log(`Scheduler API listening on port ${port}`),
+    console.log(`[API] Started on port ${port}`),
   );
 }
 

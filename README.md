@@ -1,101 +1,156 @@
-# Distributed Job Scheduler
+# Job Scheduler Platform
 
-A production-inspired distributed job scheduling platform built with a JavaScript monorepo: React/Vite frontend, Express REST API, PostgreSQL/Prisma durable state, Redis coordination, and independent workers.
+A multi-tenant background-job scheduler with a React dashboard, authenticated Express API, PostgreSQL-backed state, Redis notifications, and independent workers.
 
-## Features implemented
+## Problem and features
 
-- JWT authentication with bcrypt password hashing and protected routes
-- Organization membership and project management APIs
-- Queue priority, concurrency, pause/resume, retry policy, and statistics
-- Immediate, delayed, scheduled, recurring metadata, and batch-ready job model
-- PostgreSQL-backed atomic worker claiming with `FOR UPDATE SKIP LOCKED`
-- Independent worker registration, heartbeats, concurrent polling, execution history, and graceful shutdown
-- Fixed, linear, and exponential retry backoff with DLQ promotion and replay
-- Worker, DLQ, logs, executions, metrics, and OpenAPI endpoints
-- React operations console with login/register, protected routes, polling dashboard, jobs, and queues views
+Reliable background work must survive concurrent workers, crashes, delayed schedules, and retries without leaking one tenant's data to another. The platform provides:
 
-The worker uses PostgreSQL as the durable source of truth, Redis pub/sub for low-latency wake-ups, and polling as a recovery path. PostgreSQL-backed integration tests are opt-in because they require local Docker services.
+- Organizations, projects, queues, jobs, batches, metrics, workers, and DLQ views.
+- Predefined handlers: `PROCESS_DATA`, `SEND_EMAIL`, `GENERATE_REPORT`, `DELAY_TEST`, and `FAIL_TEST`.
+- One-off, delayed, recurring, and batch jobs.
+- Atomic PostgreSQL claiming with `FOR UPDATE SKIP LOCKED` and per-queue concurrency.
+- Worker heartbeats, stale-worker recovery, graceful shutdown, and lease fencing.
+- Fixed, linear, or exponential retry backoff and dead-letter handling.
+- JWT authentication, membership-based authorization, and IDOR protection.
+- At-least-once job execution with execution and log history.
 
-## Prerequisites
+## Architecture
 
-- Node.js 20+
-- Docker Desktop
+```text
+React/Vite dashboard --Bearer JWT--> Express API --> PostgreSQL
+                                      |                 ^
+                                      +--> Redis ------> Scheduler workers
+```
 
-## Environment variables
+The API validates and authorizes user-facing requests. PostgreSQL is the durable source of truth for jobs and leases. Redis provides low-latency job notifications; workers also poll PostgreSQL so a missed notification does not lose work. See [architecture](docs/architecture.md).
 
-Each runtime owns its own environment file. All `.env` files are ignored by Git and excluded from Docker images. Copy the relevant templates when setting up another machine:
+## Stack
+
+- React and Vite
+- Node.js, Express, Zod, JWT, bcrypt, Helmet, rate limiting
+- PostgreSQL and Prisma
+- Redis pub/sub notifications
+- Node.js test runner and Supertest
+
+## Scheduler and worker model
+
+1. An authorized user creates a job in an accessible queue.
+2. The API validates, persists it, and notifies Redis.
+3. A worker wakes from Redis or polling and atomically claims eligible work.
+4. It records an execution, runs the selected handler, and heartbeats all active jobs.
+5. It completes, retries, or DLQs the job; successful recurring jobs create their next occurrence.
+
+```text
+SCHEDULED -> QUEUED -> CLAIMED -> RUNNING -> COMPLETED
+                                  |             |
+                                  v             +-> next SCHEDULED (recurring)
+                             RETRYING -> QUEUED
+                                  |
+                                  v
+                                 DLQ
+```
+
+Claims lock candidate queues and jobs in one PostgreSQL transaction, reject paused queues, and enforce each queue's `concurrency`. Heartbeats refresh worker and active-job leases. Stale claims are conditionally requeued. Lease fencing permits a terminal state update only when the job is still `RUNNING` and claimed by that worker, preventing a resumed stale worker from overwriting a newer claim.
+
+On `SIGINT`/`SIGTERM`, workers stop acquiring jobs, drain active work, mark themselves offline, and disconnect. Queue retry policies select fixed, linear, or exponential backoff; exhausted jobs get a `DeadLetterQueueEntry` and may be retried by an authorized user.
+
+### Delivery semantics
+
+Execution is **at least once**. A crash after an external side effect and before the completion write can result in another attempt, so production handlers must be idempotent.
+
+## Authentication and authorization
+
+Passwords are bcrypt hashes; API responses never include hashes. Backend-only JWTs carry minimal identity claims and protect all non-auth routes. The API derives the caller from the verified token and scopes access through:
+
+```text
+Organization membership -> Project -> Queue -> Job / DLQ entry
+```
+
+Frontend IDs are never sufficient for authorization.
+
+## Project structure
+
+```text
+backend/             Express API, Prisma schema, routes, API tests
+frontend/            React/Vite dashboard
+worker/              Claiming, execution, heartbeats, recovery
+docs/                Architecture, database, ER diagram, API reference
+docker-compose.yml   Local PostgreSQL, Redis, and services
+```
+
+## Setup
+
+Prerequisites: Node.js 20+, npm, and Docker Desktop (recommended).
 
 ```powershell
+npm install
 Copy-Item backend/.env.example backend/.env
 Copy-Item worker/.env.example worker/.env
 Copy-Item frontend/.env.example frontend/.env
-```
-
-| Variable                       | Used by               | Purpose                                                                     |
-| ------------------------------ | --------------------- | --------------------------------------------------------------------------- |
-| `NODE_ENV`                     | Backend/worker        | `development`, `test`, or `production`                                      |
-| `PORT`                         | Backend               | API port; default `4000`                                                    |
-| `DATABASE_URL`                 | Backend/worker/Prisma | PostgreSQL connection string, configured separately in backend and worker   |
-| `POSTGRES_USER`                | Docker Compose        | PostgreSQL username; Compose defaults to `scheduler`                        |
-| `POSTGRES_PASSWORD`            | Docker Compose        | PostgreSQL password; Compose defaults to `scheduler`                        |
-| `POSTGRES_DB`                  | Docker Compose        | PostgreSQL database name; Compose defaults to `scheduler`                   |
-| `REDIS_URL`                    | Backend/worker        | Redis URL when running locally on the host                                  |
-| `JWT_SECRET`                   | Backend               | Secret used to sign JWTs; use a long random value outside local development |
-| `JWT_EXPIRES_IN`               | Backend               | JWT lifetime such as `1d` or `2h`                                           |
-| `CORS_ORIGIN`                  | Backend               | Allowed frontend origin                                                     |
-| `VITE_API_URL`                 | Frontend              | Browser-visible API base URL; must use the `VITE_` prefix                   |
-| `WORKER_ID`                    | Worker                | Unique worker identity per process                                          |
-| `WORKER_POLL_INTERVAL_MS`      | Worker                | Recovery polling interval                                                   |
-| `WORKER_HEARTBEAT_INTERVAL_MS` | Worker                | Heartbeat frequency                                                         |
-| `WORKER_STALE_AFTER_MS`        | Worker                | Offline heartbeat threshold                                                 |
-| `RUN_DB_TESTS`                 | Integration tests     | Set to `1` to run the PostgreSQL atomic-claim test                          |
-
-## Local setup
-
-```bash
-npm install
-docker compose up -d
+docker compose up -d postgres redis
 npm run db:generate
 npm run db:push
+```
+
+Set a long, unique `JWT_SECRET` in `backend/.env`. Do not put it, database credentials, or Redis credentials in the frontend. If PowerShell blocks npm's script shim, use `npm.cmd` instead.
+
+To run every service with Compose, supply the container's required secret first:
+
+```powershell
+$env:JWT_SECRET = "replace-with-a-long-random-secret"
+docker compose up --build
+```
+
+Run all development services or individual workspaces:
+
+```powershell
 npm run dev
+npm run dev --workspace backend
+npm run dev --workspace worker
+npm run dev --workspace frontend
 ```
 
-`npm run db:push` creates or synchronizes the local database tables from the Prisma schema. Use `npm run db:migrate` instead when you are maintaining committed migration history.
+API: `http://localhost:4000` · Swagger: `http://localhost:4000/api-docs` · Vite: `http://localhost:5173`.
 
-Run the database-backed atomic-claim test after Docker Desktop is running:
+`db:push` is the current local schema command. Use `npm run db:migrate` only when creating a named Prisma migration for a deliberate schema change.
+
+## Environment variables
+
+| Component | Variables | Purpose |
+| --- | --- | --- |
+| Backend | `DATABASE_URL`, `REDIS_URL`, `JWT_SECRET`, `JWT_EXPIRES_IN`, `CORS_ORIGIN`, `PORT` | Database, notifications, JWT security, browser origin, and API port. |
+| Worker | `DATABASE_URL`, `REDIS_URL`, `WORKER_ID`, `WORKER_POLL_INTERVAL_MS`, `WORKER_HEARTBEAT_INTERVAL_MS`, `WORKER_STALE_AFTER_MS`, `WORKER_JOB_TIMEOUT_MS` | Durable state, notifications, identity, polling, leases, recovery, and handler timeout. |
+| Frontend | `VITE_API_URL` | Public API base URL only. |
+
+See each `.env.example` for development defaults. Never commit real `.env` files.
+
+## Tests
 
 ```powershell
-$env:DATABASE_URL="postgresql://scheduler:scheduler@localhost:5432/scheduler?schema=public"
-$env:RUN_DB_TESTS="1"
+$env:RUN_DB_TESTS = "1"
+npm test
 npm run test:integration
+npm run build --workspace frontend
 ```
 
-## Worker
+Most recently verified: backend **14/14** passing, worker **7/7** passing, and the frontend production build passing.
 
-Start the worker independently from the repository root:
+## References
 
-```powershell
-npm run start --workspace worker
-```
+- [Architecture](docs/architecture.md)
+- [Database design](docs/database.md)
+- [ER diagram](docs/er-diagram.md)
+- [API reference](docs/api.md)
 
-The worker loads `worker/.env`, registers its `WORKER_ID`, sends heartbeats, polls PostgreSQL, and uses Redis wake-ups when Redis is available. PostgreSQL polling remains the recovery path when Redis is offline.
+## Known limitations
 
-Supported simulation handlers are selected with `payload.handler`:
+- At-least-once delivery requires idempotent handlers for external side effects.
+- `currentJobId` provides limited dashboard observability when a worker runs multiple jobs concurrently.
+- Redis notifications are not a durable event log; PostgreSQL polling is the durability fallback.
 
-```json
-{ "handler": "DELAY_TEST", "durationMs": 1000 }
-{ "handler": "FAIL_TEST" }
-{ "handler": "PROCESS_DATA" }
-{ "handler": "SEND_EMAIL" }
-{ "handler": "GENERATE_REPORT" }
-```
+## Future improvements
 
-`SEND_EMAIL`, `PROCESS_DATA`, and `GENERATE_REPORT` are deliberately safe simulations; no external email or report service is called.
-
-Delayed jobs use `delaySeconds` in the API. They are stored as `SCHEDULED`, promoted to `QUEUED` only after `scheduledAt`, and only then become eligible for atomic claiming.
-
-API health: http://localhost:4000/health
-Frontend: http://localhost:5173
-API docs: http://localhost:4000/api-docs
-
-See `docs/` for architecture, database, API, ER, and implementation-specific design decisions.
+- Handler idempotency keys and external-side-effect audit records.
+- Richer multi-job worker/lease observability and alerting for stale workers or growing DLQs.
+- Deployment-specific operational runbooks and metrics export.

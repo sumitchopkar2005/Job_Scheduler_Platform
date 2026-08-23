@@ -15,10 +15,7 @@ export const redis = new Redis(
 let redisWarningShown = false;
 redis.on("error", (error) => {
   if (!redisWarningShown) {
-    console.warn(
-      "Redis unavailable; PostgreSQL polling remains active:",
-      error.message,
-    );
+    console.warn(`[ERROR] Redis unavailable | ${error.message}`);
     redisWarningShown = true;
   }
 });
@@ -28,9 +25,6 @@ export async function publishJobEvent(event, payload) {
     if (redis.status === "wait") await redis.connect();
     await redis.publish(`scheduler:${event}`, JSON.stringify(payload));
   } catch (error) {
-    console.warn(
-      "Redis dispatch unavailable; durable polling remains active",
-      error.message,
-    );
+    console.warn(`[ERROR] Redis dispatch unavailable | ${error.message}`);
   }
 }

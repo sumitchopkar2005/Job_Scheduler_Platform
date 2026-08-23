@@ -10,19 +10,14 @@ dotenv.config({
 });
 
 const nodeEnv = process.env.NODE_ENV || "development";
-const jwtSecret =
-  process.env.JWT_SECRET ||
-  (nodeEnv === "production"
-    ? ""
-    : "local-development-secret-not-for-production-please-change");
+const jwtSecret = process.env.JWT_SECRET || "";
 const jwtExpiresIn = process.env.JWT_EXPIRES_IN || "1d";
 const corsOrigin = process.env.CORS_ORIGIN || "http://localhost:5173";
 
-if (nodeEnv === "production" && (!jwtSecret || jwtSecret.length < 32)) {
-  throw new Error(
-    "JWT_SECRET must be configured with at least 32 characters in production",
-  );
-}
+if (!jwtSecret || jwtSecret.length < 32)
+  throw new Error("JWT_SECRET must be configured with at least 32 characters");
+if (!process.env.DATABASE_URL)
+  throw new Error("DATABASE_URL must be configured");
 if (!/^https?:\/\/[^\s/]+(?::\d+)?$/.test(corsOrigin)) {
   throw new Error("CORS_ORIGIN must be a single http(s) origin");
 }

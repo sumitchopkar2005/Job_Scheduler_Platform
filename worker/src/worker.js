@@ -75,39 +75,60 @@ async function runJob(job) {
         )?.status === "CANCELLED",
     });
     const completedAt = new Date();
-    await prisma.$transaction([
-      prisma.job.update({
-        where: { id: job.id },
+    const completed = await prisma.$transaction(async (tx) => {
+      const updated = await tx.job.updateMany({
+        where: {
+          id: job.id,
+          status: "RUNNING",
+          claimedBy: config.workerId,
+        },
         data: {
           status: "COMPLETED",
           completedAt,
           claimedBy: null,
           claimedAt: null,
         },
-      }),
-      prisma.jobExecution.update({
+      });
+      if (updated.count !== 1) {
+        await tx.jobExecution.updateMany({
+          where: { id: execution.id, status: "RUNNING" },
+          data: {
+            status: "FAILED",
+            completedAt,
+            durationMs: completedAt.getTime() - startedAt.getTime(),
+            error: "Job lease was lost before completion",
+          },
+        });
+        return false;
+      }
+
+      await tx.jobExecution.update({
         where: { id: execution.id },
         data: {
           status: "COMPLETED",
           completedAt,
           durationMs: completedAt.getTime() - startedAt.getTime(),
         },
-      }),
-      prisma.jobLog.create({
+      });
+      await tx.jobLog.create({
         data: {
           jobId: job.id,
           workerId: config.workerId,
           message: "Job completed",
           metadata: result,
         },
-      }),
-      prisma.worker.update({
+      });
+      await tx.worker.update({
         where: { id: config.workerId },
-        data: { jobsProcessed: { increment: 1 }, currentJobId: null },
-      }),
-    ]);
-    if (job.type === "RECURRING" && job.cronExpression)
-      await scheduleNext(job, completedAt);
+        data: { jobsProcessed: { increment: 1 } },
+      });
+      return true;
+    });
+    if (completed) {
+      console.log(`[WORKER] Job ${job.id} completed`);
+      if (job.type === "RECURRING" && job.cronExpression)
+        await scheduleNext(job, completedAt);
+    }
   } catch (error) {
     const completedAt = new Date();
     if (error instanceof JobCancelledError) {
@@ -138,10 +159,6 @@ async function runJob(job) {
             message: "Job cancelled",
           },
         }),
-        prisma.worker.update({
-          where: { id: config.workerId },
-          data: { currentJobId: null },
-        }),
       ]);
       return;
     }
@@ -150,9 +167,13 @@ async function runJob(job) {
       include: { retryPolicy: true },
     });
     const decision = retryDecision(job, queue);
-    await prisma.$transaction([
-      prisma.job.update({
-        where: { id: job.id },
+    await prisma.$transaction(async (tx) => {
+      const updated = await tx.job.updateMany({
+        where: {
+          id: job.id,
+          status: "RUNNING",
+          claimedBy: config.workerId,
+        },
         data: {
           status: decision.status,
           lastError: error.message,
@@ -160,10 +181,23 @@ async function runJob(job) {
           claimedAt: null,
           scheduledAt: decision.canRetry
             ? new Date(Date.now() + decision.retryDelay * 1000)
-            : job.scheduledAt,
+          : job.scheduledAt,
         },
-      }),
-      prisma.jobExecution.update({
+      });
+      if (updated.count !== 1) {
+        await tx.jobExecution.updateMany({
+          where: { id: execution.id, status: "RUNNING" },
+          data: {
+            status: "FAILED",
+            completedAt,
+            durationMs: completedAt.getTime() - startedAt.getTime(),
+            error: "Job lease was lost before failure processing",
+          },
+        });
+        return;
+      }
+
+      await tx.jobExecution.update({
         where: { id: execution.id },
         data: {
           status: "FAILED",
@@ -171,8 +205,8 @@ async function runJob(job) {
           durationMs: completedAt.getTime() - startedAt.getTime(),
           error: error.message,
         },
-      }),
-      prisma.jobLog.create({
+      });
+      await tx.jobLog.create({
         data: {
           jobId: job.id,
           workerId: config.workerId,
@@ -180,32 +214,29 @@ async function runJob(job) {
           message: decision.canRetry ? "Retry scheduled" : "Job moved to DLQ",
           metadata: { error: error.message, retryDelay: decision.retryDelay },
         },
-      }),
-      ...(decision.canRetry
-        ? []
-        : [
-            prisma.deadLetterQueueEntry.upsert({
-              where: { jobId: job.id },
-              create: {
-                jobId: job.id,
-                queueId: job.queueId,
-                failureReason: "Maximum attempts exceeded",
-                attempts: job.attempts,
-                lastError: error.message,
-                workerId: config.workerId,
-              },
-              update: {
-                attempts: job.attempts,
-                lastError: error.message,
-                workerId: config.workerId,
-              },
-            }),
-          ]),
-      prisma.worker.update({
-        where: { id: config.workerId },
-        data: { currentJobId: null },
-      }),
-    ]);
+      });
+      if (!decision.canRetry) {
+        await tx.deadLetterQueueEntry.upsert({
+          where: { jobId: job.id },
+          create: {
+            jobId: job.id,
+            queueId: job.queueId,
+            failureReason: "Maximum attempts exceeded",
+            attempts: job.attempts,
+            lastError: error.message,
+            workerId: config.workerId,
+          },
+          update: {
+            attempts: job.attempts,
+            lastError: error.message,
+            workerId: config.workerId,
+          },
+        });
+      }
+      console.log(
+        `[WORKER] Job ${job.id} ${decision.canRetry ? "retrying" : "→ DLQ"}`,
+      );
+    });
   }
 }
 
@@ -217,6 +248,7 @@ async function poll() {
   if (shuttingDown) return;
   const job = await claimNextJob(config.workerId);
   if (!job) return;
+  console.log(`[WORKER] Job ${job.id} claimed`);
   activeJobs.add(job.id);
   currentJobId = job.id;
   runJob(job)
@@ -233,7 +265,7 @@ async function connectWithRetry() {
       await registerWorker();
       return;
     } catch (error) {
-      console.error("Worker registration unavailable:", error.message);
+      console.error(`[ERROR] WORKER registration failed | ${error.message}`);
       await sleep(2000);
     }
   }
@@ -242,7 +274,7 @@ async function connectWithRetry() {
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`${signal}: draining ${activeJobs.size} active jobs`);
+  console.log(`[WORKER] ${signal}: draining ${activeJobs.size} jobs`);
   while (activeJobs.size > 0) await sleep(100);
   try {
     await prisma.worker.update({
@@ -250,7 +282,7 @@ async function shutdown(signal) {
       data: { status: "OFFLINE", currentJobId: null },
     });
   } catch (error) {
-    console.error("Unable to mark worker offline:", error.message);
+    console.error(`[ERROR] WORKER shutdown failed | ${error.message}`);
   }
   await prisma.$disconnect();
   process.exit(0);
@@ -259,12 +291,15 @@ async function shutdown(signal) {
 await connectWithRetry();
 const stopHeartbeat = startHeartbeat(() => [...activeJobs]);
 const poller = setInterval(
-  () => poll().catch((error) => console.error("Polling failed safely", error)),
+  () =>
+    poll().catch((error) =>
+      console.error(`[ERROR] WORKER polling failed | ${error.message}`),
+    ),
   config.pollIntervalMs,
 );
 const stopDispatchWakeup = await startDispatchWakeup(() =>
   poll().catch((error) =>
-    console.error("Dispatch wake-up failed safely", error),
+    console.error(`[ERROR] WORKER wake-up failed | ${error.message}`),
   ),
 );
 process.on("SIGTERM", () => shutdown("SIGTERM"));
@@ -274,4 +309,4 @@ process.on("exit", () => {
   stopHeartbeat();
   stopDispatchWakeup();
 });
-console.log(`Worker ${config.workerId} is ready`);
+console.log("[WORKER] Started");

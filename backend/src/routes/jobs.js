@@ -4,6 +4,7 @@ import { prisma } from "../db.js";
 import { requireAuth } from "../middleware/auth.js";
 import { assertTransition } from "../services/jobState.js";
 import { publishJobEvent } from "../redis.js";
+import { CronExpressionParser } from "cron-parser";
 
 const router = Router();
 const handlerTypeSchema = z.enum([
@@ -63,6 +64,17 @@ const jobSchema = z
         path: ["cronExpression"],
         message: "Recurring jobs require a cron expression",
       });
+    if (value.type === "RECURRING" && value.cronExpression) {
+      try {
+        CronExpressionParser.parse(value.cronExpression);
+      } catch {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["cronExpression"],
+          message: "Recurring jobs require a valid cron expression",
+        });
+      }
+    }
     if (value.type !== "RECURRING" && value.cronExpression)
       context.addIssue({
         code: z.ZodIssueCode.custom,
