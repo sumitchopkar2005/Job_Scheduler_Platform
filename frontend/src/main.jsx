@@ -160,7 +160,7 @@ function AuthPage({ register = false }) {
           Password
           <input
             required
-            minLength="12"
+            minLength="8"
             type="password"
             value={form.password}
             onChange={(event) =>
@@ -173,7 +173,7 @@ function AuthPage({ register = false }) {
             Confirm Password
             <input
               required
-              minLength="12"
+              minLength="8"
               type="password"
               value={form.passwordConfirmation}
               onChange={(event) =>

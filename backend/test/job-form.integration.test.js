@@ -6,6 +6,144 @@ import { prisma } from "../src/db.js";
 
 const enabled = process.env.RUN_DB_TESTS === "1";
 
+async function createJobContext(suffix) {
+  const email = `payload-${suffix}@test.local`;
+  const password = "Correct-Horse1!";
+  const register = await request(app)
+    .post("/api/v1/auth/register")
+    .send({
+      name: "Payload Test",
+      email,
+      password,
+      passwordConfirmation: password,
+    });
+  const token = register.body.data.token;
+  const organization = await prisma.organization.findFirstOrThrow({
+    where: { members: { some: { user: { email } } } },
+  });
+  const project = await request(app)
+    .post("/api/v1/projects")
+    .set("Authorization", `Bearer ${token}`)
+    .send({ organizationId: organization.id, name: `Payload Project ${suffix}` });
+  const queue = await request(app)
+    .post("/api/v1/queues")
+    .set("Authorization", `Bearer ${token}`)
+    .send({ projectId: project.body.data.project.id, name: `payload-${suffix}` });
+  return {
+    email,
+    token,
+    projectId: project.body.data.project.id,
+    queueId: queue.body.data.queue.id,
+  };
+}
+
+test(
+  "job creation preserves an optional non-trivial payload",
+  { skip: !enabled },
+  async () => {
+    const suffix = `${Date.now().toString(36)}-provided`;
+    const context = await createJobContext(suffix);
+    const payload = {
+      records: [{ id: 17, value: "queued" }],
+      options: { notify: true, priority: "high" },
+    };
+
+    try {
+      const created = await request(app)
+        .post("/api/v1/jobs")
+        .set("Authorization", `Bearer ${context.token}`)
+        .send({
+          projectId: context.projectId,
+          queueId: context.queueId,
+          name: "payload-job-name",
+          handlerType: "PROCESS_DATA",
+          payload,
+        });
+      assert.equal(created.status, 201);
+      assert.deepEqual(created.body.data.job.payload, payload);
+
+      const fetched = await request(app)
+        .get(`/api/v1/jobs/${created.body.data.job.id}`)
+        .set("Authorization", `Bearer ${context.token}`);
+      assert.equal(fetched.status, 200);
+      assert.deepEqual(fetched.body.data.job.payload, payload);
+    } finally {
+      await prisma.user.delete({ where: { email: context.email } });
+    }
+  },
+);
+
+test(
+  "job creation defaults an omitted payload to an empty object",
+  { skip: !enabled },
+  async () => {
+    const suffix = `${Date.now().toString(36)}-empty`;
+    const context = await createJobContext(suffix);
+
+    try {
+      const created = await request(app)
+        .post("/api/v1/jobs")
+        .set("Authorization", `Bearer ${context.token}`)
+        .send({
+          projectId: context.projectId,
+          queueId: context.queueId,
+          name: "job-without-payload",
+          handlerType: "SEND_EMAIL",
+        });
+      assert.equal(created.status, 201);
+      assert.deepEqual(created.body.data.job.payload, {});
+
+      const fetched = await request(app)
+        .get(`/api/v1/jobs/${created.body.data.job.id}`)
+        .set("Authorization", `Bearer ${context.token}`);
+      assert.equal(fetched.status, 200);
+      assert.deepEqual(fetched.body.data.job.payload, {});
+    } finally {
+      await prisma.user.delete({ where: { email: context.email } });
+    }
+  },
+);
+
+test(
+  "job creation is idempotent within a project",
+  { skip: !enabled },
+  async () => {
+    const suffix = `${Date.now().toString(36)}-idempotent`;
+    const context = await createJobContext(suffix);
+    const body = {
+      projectId: context.projectId,
+      queueId: context.queueId,
+      name: "idempotent-job",
+      handlerType: "PROCESS_DATA",
+      idempotencyKey: `request-${suffix}`,
+    };
+
+    try {
+      const first = await request(app)
+        .post("/api/v1/jobs")
+        .set("Authorization", `Bearer ${context.token}`)
+        .send(body);
+      const second = await request(app)
+        .post("/api/v1/jobs")
+        .set("Authorization", `Bearer ${context.token}`)
+        .send(body);
+      const count = await prisma.job.count({
+        where: {
+          projectId: context.projectId,
+          idempotencyKey: body.idempotencyKey,
+        },
+      });
+
+      assert.equal(first.status, 201);
+      assert.equal(second.status, 200);
+      assert.equal(second.body.data.job.id, first.body.data.job.id);
+      assert.equal(count, 1);
+    } finally {
+      await prisma.user.delete({ where: { email: context.email } });
+    }
+  },
+);
+
 test(
   "job creation derives max attempts from the selected queue policy",
   { skip: !enabled },

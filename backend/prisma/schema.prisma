@@ -140,6 +140,7 @@ model Job {
   type           JobType               @default(IMMEDIATE)
   handlerType    HandlerType           @default(PROCESS_DATA)
   payload        Json
+  idempotencyKey String?
   priority       Int                   @default(0)
   status         JobStatus             @default(QUEUED)
   scheduledAt    DateTime              @default(now())
@@ -165,6 +166,7 @@ model Job {
   @@index([queueId, status, scheduledAt, priority])
   @@index([status, claimedAt])
   @@index([projectId, createdAt])
+  @@unique([projectId, idempotencyKey])
   @@index([batchId])
 }
 

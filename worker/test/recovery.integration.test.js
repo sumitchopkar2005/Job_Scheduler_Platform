@@ -50,7 +50,7 @@ test("stale running jobs are recovered and their execution history is closed", {
       data: { jobId: job.id, workerId, attemptNumber: 1 },
     });
 
-    assert.equal(await recoverStaleJobs(0), 1);
+    assert.equal(await recoverStaleJobs(0, { queueId: queue.id }), 1);
 
     const recoveredJob = await prisma.job.findUniqueOrThrow({
       where: { id: job.id },

@@ -1,9 +1,10 @@
 import { prisma } from "./claim.js";
 
-export async function recoverStaleJobs(staleAfterMs) {
+export async function recoverStaleJobs(staleAfterMs, filter = {}) {
   const cutoff = new Date(Date.now() - staleAfterMs);
   const staleJobs = await prisma.job.findMany({
     where: {
+      ...filter,
       status: { in: ["CLAIMED", "RUNNING"] },
       claimedAt: { lt: cutoff },
       claimedBy: { not: null },

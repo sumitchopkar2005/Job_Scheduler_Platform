@@ -23,6 +23,8 @@ const jobSchema = z
       .enum(["IMMEDIATE", "DELAYED", "SCHEDULED", "RECURRING", "BATCH"])
       .default("IMMEDIATE"),
     handlerType: handlerTypeSchema,
+    payload: z.record(z.any()).optional().default({}),
+    idempotencyKey: z.string().trim().min(1).max(128).optional(),
     priority: z.number().int().min(-100).max(100).default(0),
     scheduledAt: z.coerce.date().optional(),
     delaySeconds: z.number().int().min(1).max(31536000).optional(),
@@ -168,31 +170,56 @@ router.post("/", async (req, res, next) => {
           success: false,
           error: { code: "QUEUE_NOT_FOUND", message: "Queue does not exist" },
         });
+    if (parsed.data.idempotencyKey) {
+      const existing = await prisma.job.findUnique({
+        where: {
+          projectId_idempotencyKey: {
+            projectId: parsed.data.projectId,
+            idempotencyKey: parsed.data.idempotencyKey,
+          },
+        },
+      });
+      if (existing) return res.status(200).json({ success: true, data: { job: existing } });
+    }
     const scheduledAt =
       parsed.data.type === "DELAYED"
         ? new Date(Date.now() + parsed.data.delaySeconds * 1000)
         : parsed.data.scheduledAt || new Date();
     const status = scheduledAt > new Date() ? "SCHEDULED" : "QUEUED";
     const { delaySeconds, ...jobData } = parsed.data;
-    const job = await prisma.job.create({
-      data: {
-        ...jobData,
-        payload: {},
-        scheduledAt,
-        status,
-        maxAttempts: queue.retryPolicy?.maximumAttempts || 3,
-        ...(parsed.data.type === "RECURRING" && parsed.data.cronExpression
-          ? {
-              scheduledJob: {
-                create: {
-                  cron: parsed.data.cronExpression,
-                  nextRunAt: scheduledAt,
+    let job;
+    try {
+      job = await prisma.job.create({
+        data: {
+          ...jobData,
+          scheduledAt,
+          status,
+          // Retry limits are intentionally controlled by the queue policy.
+          maxAttempts: queue.retryPolicy?.maximumAttempts || 3,
+          ...(parsed.data.type === "RECURRING" && parsed.data.cronExpression
+            ? {
+                scheduledJob: {
+                  create: {
+                    cron: parsed.data.cronExpression,
+                    nextRunAt: scheduledAt,
+                  },
                 },
-              },
-            }
-          : {}),
-      },
-    });
+              }
+            : {}),
+        },
+      });
+    } catch (error) {
+      if (error.code !== "P2002" || !parsed.data.idempotencyKey) throw error;
+      job = await prisma.job.findUniqueOrThrow({
+        where: {
+          projectId_idempotencyKey: {
+            projectId: parsed.data.projectId,
+            idempotencyKey: parsed.data.idempotencyKey,
+          },
+        },
+      });
+      return res.status(200).json({ success: true, data: { job } });
+    }
     await publishJobEvent("job-created", {
       jobId: job.id,
       queueId: job.queueId,

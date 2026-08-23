@@ -11,7 +11,7 @@ import { requireAuth } from "../middleware/auth.js";
 const router = Router();
 const passwordSchema = z
   .string()
-  .min(12, "Password must be at least 12 characters")
+  .min(8, "Password must be at least 8 characters")
   .max(128)
   .regex(/[a-z]/, "Password must include a lowercase letter")
   .regex(/[A-Z]/, "Password must include an uppercase letter")

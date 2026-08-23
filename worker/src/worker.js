@@ -9,37 +9,14 @@ import {
   promoteDueScheduledJobs,
 } from "./recovery.js";
 import { retryDecision } from "./retry.js";
-import { CronExpressionParser } from "cron-parser";
+import { scheduleNextIfRecurring } from "./scheduling.js";
+import { completeClaimedJob } from "./completion.js";
 
 let shuttingDown = false;
 let currentJobId = null;
 const activeJobs = new Set();
 const sleep = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
-
-async function scheduleNext(job, currentDate) {
-  const nextRunAt = CronExpressionParser.parse(job.cronExpression, {
-    currentDate,
-  })
-    .next()
-    .toDate();
-  await prisma.job.create({
-    data: {
-      projectId: job.projectId,
-      queueId: job.queueId,
-      name: job.name,
-      type: "RECURRING",
-      handlerType: job.handlerType,
-      payload: {},
-      priority: job.priority,
-      status: "SCHEDULED",
-      scheduledAt: nextRunAt,
-      cronExpression: job.cronExpression,
-      maxAttempts: job.maxAttempts,
-      scheduledJob: { create: { cron: job.cronExpression, nextRunAt } },
-    },
-  });
-}
 
 async function runJob(job) {
   const startedAt = new Date();
@@ -75,59 +52,17 @@ async function runJob(job) {
         )?.status === "CANCELLED",
     });
     const completedAt = new Date();
-    const completed = await prisma.$transaction(async (tx) => {
-      const updated = await tx.job.updateMany({
-        where: {
-          id: job.id,
-          status: "RUNNING",
-          claimedBy: config.workerId,
-        },
-        data: {
-          status: "COMPLETED",
-          completedAt,
-          claimedBy: null,
-          claimedAt: null,
-        },
-      });
-      if (updated.count !== 1) {
-        await tx.jobExecution.updateMany({
-          where: { id: execution.id, status: "RUNNING" },
-          data: {
-            status: "FAILED",
-            completedAt,
-            durationMs: completedAt.getTime() - startedAt.getTime(),
-            error: "Job lease was lost before completion",
-          },
-        });
-        return false;
-      }
-
-      await tx.jobExecution.update({
-        where: { id: execution.id },
-        data: {
-          status: "COMPLETED",
-          completedAt,
-          durationMs: completedAt.getTime() - startedAt.getTime(),
-        },
-      });
-      await tx.jobLog.create({
-        data: {
-          jobId: job.id,
-          workerId: config.workerId,
-          message: "Job completed",
-          metadata: result,
-        },
-      });
-      await tx.worker.update({
-        where: { id: config.workerId },
-        data: { jobsProcessed: { increment: 1 } },
-      });
-      return true;
+    const completed = await completeClaimedJob(prisma, {
+      jobId: job.id,
+      executionId: execution.id,
+      workerId: config.workerId,
+      completedAt,
+      startedAt,
+      result,
     });
     if (completed) {
       console.log(`[WORKER] Job ${job.id} completed`);
-      if (job.type === "RECURRING" && job.cronExpression)
-        await scheduleNext(job, completedAt);
+      await scheduleNextIfRecurring(prisma, job, completedAt);
     }
   } catch (error) {
     const completedAt = new Date();

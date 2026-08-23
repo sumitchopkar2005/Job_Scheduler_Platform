@@ -63,7 +63,9 @@ app.use((error, req, res, _next) => {
 });
 
 const runningUnderNodeTest =
-  process.argv.includes("--test") || process.env.RUN_DB_TESTS === "1";
+  process.argv.includes("--test") ||
+  process.argv.some((argument) => argument.endsWith(".test.js")) ||
+  process.env.RUN_DB_TESTS === "1";
 if (env.nodeEnv !== "test" && !runningUnderNodeTest) {
   const port = env.port;
   app.listen(port, () =>
